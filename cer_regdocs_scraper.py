@@ -5,7 +5,7 @@ CER REGDOCS Scraper
 Downloads all documents (PDF or HTML-printed-to-PDF) from a pre-filtered
 Canada Energy Regulator REGDOCS Advanced Search URL.
 
-Requires: Python 3.10+, Microsoft Edge, internet access.
+Requires: Python 3.10+, Google Chrome, internet access.
 See README for pip install commands.
 
 Usage:
@@ -34,11 +34,11 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from selenium.webdriver.common.by import By
-from selenium.webdriver.edge.options import Options as EdgeOptions
-from selenium.webdriver.edge.service import Service as EdgeService
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,10 +137,10 @@ def make_pdf_filename(url: str, suffix: str = "") -> str:
 # BROWSER SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_edge_driver(download_dir: Path) -> webdriver.Edge:
+def build_driver(download_dir: Path) -> webdriver.Chrome:
     """
-    Create a configured Edge WebDriver.
-    Forces PDFs to download (not open in-browser) via Edge preferences.
+    Create a configured Chrome WebDriver.
+    Forces PDFs to download (not open in-browser) via Chrome preferences.
     """
     download_dir.mkdir(parents=True, exist_ok=True)
     download_path_str = str(download_dir.resolve())
@@ -156,14 +156,13 @@ def build_edge_driver(download_dir: Path) -> webdriver.Edge:
         "safebrowsing.enabled": True,
     }
 
-    options = EdgeOptions()
+    options = ChromeOptions()
     options.add_experimental_option("prefs", prefs)
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-infobars")
-    # Suppress "Chrome is being controlled by automated test software" bar
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
@@ -172,8 +171,8 @@ def build_edge_driver(download_dir: Path) -> webdriver.Edge:
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
 
-    service = EdgeService(EdgeChromiumDriverManager().install())
-    driver = webdriver.Edge(service=service, options=options)
+    service = ChromeService(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
 
     return driver
@@ -183,7 +182,7 @@ def build_edge_driver(download_dir: Path) -> webdriver.Edge:
 # CHROME DEVTOOLS PROTOCOL  (CDP) — HTML → PDF
 # ─────────────────────────────────────────────────────────────────────────────
 
-def cdp_print_to_pdf(driver: webdriver.Edge, output_path: Path) -> bool:
+def cdp_print_to_pdf(driver: webdriver.Chrome, output_path: Path) -> bool:
     """
     Print the currently loaded page to a PDF file using CDP Page.printToPDF.
     This is the only reliable way to save HTML pages as PDFs from Selenium.
@@ -246,7 +245,7 @@ def wait_for_download_completion(directory: Path, timeout: int = DOWNLOAD_TIMEOU
 
 
 def trigger_browser_download(
-    driver: webdriver.Edge,
+    driver: webdriver.Chrome,
     url: str,
     download_dir: Path,
     visited_urls: set[str],
@@ -303,12 +302,12 @@ def trigger_browser_download(
     except Exception as exc:
         logger.debug(f"  [req-fail]  requests failed ({exc}) — trying browser fallback")
 
-    # ── Fallback: navigate the browser to the URL and let Edge download it ────
+    # ── Fallback: navigate the browser to the URL and let Chrome download it ───
     before = snapshot_pdfs(download_dir)
     try:
         driver.get(url)
     except TimeoutException:
-        # Normal: Edge starts a download and navigation "times out"
+        # Normal: Chrome starts a download and navigation "times out"
         pass
     except WebDriverException as exc:
         # ERR_ABORTED is also normal for direct-download URLs
@@ -332,7 +331,7 @@ def trigger_browser_download(
 # PAGINATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def detect_total_pages(driver: webdriver.Edge, logger: logging.Logger) -> int:
+def detect_total_pages(driver: webdriver.Chrome, logger: logging.Logger) -> int:
     """
     Detect the total number of result pages from the REGDOCS search UI.
     Tries several selector strategies and falls back to 1.
@@ -409,7 +408,7 @@ _RESULT_HREF_PATTERNS: list[str] = [
 ]
 
 def extract_search_result_links(
-    driver: webdriver.Edge, logger: logging.Logger
+    driver: webdriver.Chrome, logger: logging.Logger
 ) -> list[str]:
     """
     Collect all unique document/item links from the current search results page.
@@ -464,7 +463,7 @@ _PDF_HREF_PATTERNS: list[tuple[str, str]] = [
 ]
 
 def extract_pdf_links(
-    driver: webdriver.Edge,
+    driver: webdriver.Chrome,
     page_url: str,
     logger: logging.Logger,
 ) -> list[str]:
@@ -524,7 +523,7 @@ def extract_pdf_links(
 # We detect this and recurse one level.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def is_document_listing_page(driver: webdriver.Edge) -> bool:
+def is_document_listing_page(driver: webdriver.Chrome) -> bool:
     """
     Return True if the current page appears to be a listing of sub-documents
     rather than a leaf document page.
@@ -541,7 +540,7 @@ def is_document_listing_page(driver: webdriver.Edge) -> bool:
 
 
 def collect_sub_document_links(
-    driver: webdriver.Edge,
+    driver: webdriver.Chrome,
     page_url: str,
     logger: logging.Logger,
 ) -> list[str]:
@@ -601,7 +600,7 @@ def save_visited(path: Path, visited: set[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_navigate(
-    driver: webdriver.Edge,
+    driver: webdriver.Chrome,
     url: str,
     wait: WebDriverWait,
     logger: logging.Logger,
@@ -633,7 +632,7 @@ def safe_navigate(
 
 
 def process_result_page(
-    driver: webdriver.Edge,
+    driver: webdriver.Chrome,
     wait: WebDriverWait,
     result_url: str,
     download_dir: Path,
@@ -749,7 +748,7 @@ def run() -> None:
         f"{len(downloaded_names)} PDFs already downloaded."
     )
 
-    driver = build_edge_driver(download_dir)
+    driver = build_driver(download_dir)
     wait = WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT)
 
     try:
