@@ -8,25 +8,33 @@ REGDOCS Advanced Search results page.
 PURPOSE
 -------
 The Canada Energy Regulator (CER) publishes regulatory filings in their
-REGDOCS database. When you run an Advanced Search on the REGDOCS website
-and filter by date range or document type, you get a list of documents.
-This tool takes that filtered search URL and downloads every PDF from
-those results to a folder on your computer — instead of you clicking
-each one manually.
+REGDOCS database. When you run an Advanced Search and filter by date range
+or document type, you get a paginated list of documents. This tool takes
+that filtered search URL and downloads every PDF from those results into
+a folder on your computer — no clicking through pages manually.
 
 HOW IT WORKS
 ------------
-  1. Loads the search results page (handles multiple pages automatically)
-  2. Collects links to each individual document listed in the results
-  3. Opens each document page and finds the PDF download link
-  4. Downloads each PDF into a local folder
-  5. Saves progress as it goes — if interrupted, re-running it skips
-     files already downloaded
+The REGDOCS site loads its search results using JavaScript, so a plain
+HTTP request only returns an empty page shell. This tool uses a lightweight
+headless browser (Playwright/Chromium) just for the part that requires
+JavaScript — clicking through result pages and collecting document links.
+Once it has all the links, it downloads every PDF using plain HTTP requests,
+which is fast and doesn't need the browser at all.
+
+  Step 1 — Open the search URL in a headless browser.
+  Step 2 — Collect all document download links from the results.
+  Step 3 — Click "Next 20 Results" and repeat until no more pages.
+  Step 4 — For each collected link, download the PDF via HTTP.
+  Step 5 — Save progress after each file so interrupted runs can resume.
 
 REQUIREMENTS
 ------------
   Python 3.10+, internet access.
-  Install dependencies: pip install requests beautifulsoup4
+
+  Install dependencies (one time only):
+    pip install playwright requests
+    playwright install chromium
 
 USAGE
 -----
@@ -42,10 +50,10 @@ import re
 import time
 import unicodedata
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,209 +71,13 @@ SEARCH_URL: str = (
 BASE_URL: str = "https://apps.cer-rec.gc.ca"
 OUTPUT_DIR: Path = Path("regdocs_downloads")
 
-# Seconds to pause between HTTP requests (avoids overloading the server)
-REQUEST_DELAY: float = 1.0
-REQUEST_TIMEOUT: int = 30
+# Seconds to wait between download requests (avoids hammering the server)
+DOWNLOAD_DELAY: float = 1.0
+DOWNLOAD_TIMEOUT: int = 60
 MAX_RETRIES: int = 3
-RETRY_BACKOFF: float = 5.0     # seconds between retries (multiplied by attempt number)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP SESSION
-# Sets browser-like headers so the server accepts our requests.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def make_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-CA,en;q=0.9",
-    })
-    return session
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fetch_page(
-    session: requests.Session,
-    url: str,
-    logger: logging.Logger,
-) -> BeautifulSoup | None:
-    """
-    Load a web page and return its parsed HTML.
-    Retries up to MAX_RETRIES times on failure.
-    Returns None if the page could not be loaded.
-    """
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            time.sleep(REQUEST_DELAY)
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            return BeautifulSoup(resp.text, "html.parser")
-        except requests.RequestException as exc:
-            logger.warning(f"  Attempt {attempt}/{MAX_RETRIES} failed for {url}: {exc}")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-    logger.error(f"  Could not load {url} after {MAX_RETRIES} attempts — skipping.")
-    return None
-
-
-def download_pdf(
-    session: requests.Session,
-    url: str,
-    dest: Path,
-    logger: logging.Logger,
-) -> bool:
-    """
-    Download a PDF file and save it to dest.
-    Skips if the file already exists.
-    Returns True on success.
-    """
-    if dest.exists():
-        logger.info(f"  [exists]  {dest.name}")
-        return True
-    try:
-        time.sleep(REQUEST_DELAY)
-        resp = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
-        resp.raise_for_status()
-        dest.write_bytes(resp.content)
-        logger.info(f"  [saved]   {dest.name}  ({dest.stat().st_size:,} bytes)")
-        return True
-    except requests.RequestException as exc:
-        logger.error(f"  [fail]    {url}: {exc}")
-        return False
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FILENAME UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
-
-def safe_filename(name: str, max_len: int = 180) -> str:
-    """Strip characters that are invalid in file names on Windows and Linux."""
-    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
-    name = re.sub(r'[\\/:*?"<>|]', "_", name)
-    name = re.sub(r"\s+", "_", name.strip()).strip("._")
-    return (name or "unnamed")[:max_len]
-
-
-def pdf_filename_from_url(url: str) -> str:
-    """Derive a .pdf filename from the last segment of a URL."""
-    segment = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
-    stem = safe_filename(segment) or "document"
-    return stem if stem.lower().endswith(".pdf") else f"{stem}.pdf"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LINK EXTRACTION
-# These functions read parsed HTML and pull out the URLs we care about.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# URL path segments that indicate a REGDOCS document or item page
-_RESULT_PATTERNS = ["/REGDOCS/Item/", "/REGDOCS/File/", "/REGDOCS/Document/"]
-
-# URL patterns that suggest a direct PDF download link
-_PDF_PATTERNS = [
-    ".pdf", "/PDF/", "/Download/", "/GetFile",
-    "filetype=pdf", "format=pdf", "type=pdf", "/File/",
-]
-
-
-def find_document_links(soup: BeautifulSoup) -> list[str]:
-    """
-    Find links to individual REGDOCS document pages within a search results page.
-    Returns a list of absolute URLs.
-    """
-    links: set[str] = set()
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-        if href.startswith("/"):
-            href = BASE_URL + href
-        if any(pattern in href for pattern in _RESULT_PATTERNS):
-            links.add(href.split("#")[0])
-    return sorted(links)
-
-
-def find_pdf_links(soup: BeautifulSoup, page_url: str) -> list[str]:
-    """
-    Find PDF download links on a document detail page.
-    Returns a list of absolute URLs.
-    """
-    links: set[str] = set()
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-        link_text = tag.get_text(strip=True).lower()
-
-        if href.startswith("//"):
-            href = "https:" + href
-        elif href.startswith("/"):
-            href = BASE_URL + href
-        elif not href.startswith("http"):
-            href = urljoin(page_url, href)
-
-        if href.lower().startswith(("mailto:", "javascript:", "#")):
-            continue
-
-        href_lower = href.lower()
-        is_pdf_link = any(p in href_lower for p in _PDF_PATTERNS)
-        is_download_text = any(kw in link_text for kw in ("pdf", "download", "télécharger"))
-
-        if is_pdf_link or is_download_text:
-            links.add(href.split("#")[0])
-
-    return sorted(links)
-
-
-def detect_total_pages(soup: BeautifulSoup) -> int:
-    """
-    Read the search results pagination to find how many result pages there are.
-    Falls back to 1 if pagination cannot be detected.
-    """
-    max_page = 1
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-        m = re.search(r"[?&]p=(\d+)", href)
-        if m:
-            max_page = max(max_page, int(m.group(1)))
-        text = tag.get_text(strip=True)
-        if text.isdigit():
-            max_page = max(max_page, int(text))
-    return max_page
-
-
-def paginated_url(base: str, page: int) -> str:
-    """Append the page number parameter to a search URL."""
-    if page == 1:
-        return base
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}p={page}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PROGRESS TRACKING
-# Saves visited URLs to disk so interrupted runs can resume without
-# re-downloading files that are already complete.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_visited(path: Path) -> set[str]:
-    if path.exists():
-        try:
-            return set(json.loads(path.read_text(encoding="utf-8"))["visited"])
-        except Exception:
-            pass
-    return set()
-
-
-def save_visited(path: Path, visited: set[str]) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"visited": sorted(visited)}, indent=2), encoding="utf-8")
-    tmp.replace(path)
+# How long to wait (ms) after clicking "Next page" for results to reload
+NEXT_PAGE_WAIT_MS: int = 3000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,6 +104,212 @@ def setup_logging(log_path: Path) -> logging.Logger:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FILENAME UTILITIES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_filename(name: str, max_len: int = 180) -> str:
+    """Remove characters that are invalid in file names on Windows and Linux."""
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
+    name = re.sub(r"\s+", "_", name.strip()).strip("._")
+    return (name or "unnamed")[:max_len]
+
+
+def filename_from_url(url: str, fallback_id: str = "") -> str:
+    """Derive a .pdf filename from a URL, using the last path segment."""
+    segment = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+    stem = safe_filename(segment) or fallback_id or "document"
+    return stem if stem.lower().endswith(".pdf") else f"{stem}.pdf"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1: collect links using a headless browser
+#
+# The search results page loads its content via JavaScript. We launch a
+# headless Chromium browser (bundled with Playwright — no system browser
+# install needed), navigate to the search URL, and click through every
+# results page to collect all file download links.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def collect_all_links(search_url: str, logger: logging.Logger) -> tuple[set[str], set[str]]:
+    """
+    Open the search URL in a headless browser, paginate through every page
+    of results, and return two sets of REGDOCS URLs:
+      - download_links : /REGDOCS/File/Download/{id}  (direct PDF links)
+      - item_links     : /REGDOCS/Item/View/{id}       (document detail pages)
+    """
+    download_links: set[str] = set()
+    item_links: set[str] = set()
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_default_timeout(30_000)
+
+        logger.info(f"  Opening search URL in headless browser...")
+        page.goto(search_url)
+
+        # Wait for the results container to be populated by JavaScript
+        try:
+            page.wait_for_selector("#divSearchResults a[href*='/REGDOCS/']", timeout=30_000)
+        except PlaywrightTimeout:
+            logger.warning("  Timed out waiting for results — page may have no results.")
+            browser.close()
+            return download_links, item_links
+
+        page_num = 0
+        while True:
+            page_num += 1
+
+            # Grab all relevant hrefs from the current results view
+            hrefs: list[str] = page.eval_on_selector_all(
+                "#divSearchResults a[href*='/REGDOCS/']",
+                "els => els.map(e => e.getAttribute('href'))",
+            )
+
+            page_downloads = set()
+            page_items = set()
+            for href in hrefs:
+                if not href:
+                    continue
+                full = BASE_URL + href if href.startswith("/") else href
+                if "/REGDOCS/File/Download/" in full:
+                    page_downloads.add(full)
+                elif "/REGDOCS/Item/View/" in full:
+                    page_items.add(full)
+
+            download_links |= page_downloads
+            item_links |= page_items
+
+            logger.info(
+                f"  Results page {page_num}: "
+                f"{len(page_downloads)} download link(s), "
+                f"{len(page_items)} item page(s)"
+            )
+
+            # Click "Next 20 Results" if the button exists
+            next_btn = page.query_selector("a.next-page")
+            if not next_btn:
+                logger.info("  No more result pages.")
+                break
+
+            next_btn.click()
+            page.wait_for_timeout(NEXT_PAGE_WAIT_MS)
+
+        browser.close()
+
+    return download_links, item_links
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1b: resolve Item/View pages to their File/Download links
+#
+# Some search results link to a document detail page (/REGDOCS/Item/View/N)
+# rather than directly to a file. We call the companion API endpoint
+# (/REGDOCS/Item/LoadResult/N) which returns the actual file list for that
+# document — this works with plain HTTP, no browser needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_item_pages(
+    item_links: set[str],
+    session: requests.Session,
+    logger: logging.Logger,
+) -> set[str]:
+    """
+    For each Item/View URL, call the LoadResult API to get its File/Download links.
+    Returns the combined set of all resolved File/Download URLs.
+    """
+    resolved: set[str] = set()
+    total = len(item_links)
+
+    for idx, item_url in enumerate(sorted(item_links), 1):
+        item_id = item_url.rstrip("/").rsplit("/", 1)[-1]
+        load_url = f"{BASE_URL}/REGDOCS/Item/LoadResult/{item_id}"
+        logger.debug(f"  [{idx}/{total}] LoadResult {item_id}")
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                time.sleep(DOWNLOAD_DELAY)
+                resp = session.get(load_url, timeout=30)
+                resp.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                logger.warning(f"    Attempt {attempt} failed: {exc}")
+                if attempt == MAX_RETRIES:
+                    logger.error(f"    Giving up on {load_url}")
+                    resp = None
+                else:
+                    time.sleep(3 * attempt)
+
+        if resp is None:
+            continue
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "/REGDOCS/File/Download/" in href:
+                full = BASE_URL + href if href.startswith("/") else href
+                resolved.add(full)
+
+    logger.info(f"  Resolved {len(resolved)} download link(s) from {total} item page(s).")
+    return resolved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2: download each PDF via HTTP
+# ─────────────────────────────────────────────────────────────────────────────
+
+def download_pdf(
+    session: requests.Session,
+    url: str,
+    dest: Path,
+    logger: logging.Logger,
+) -> bool:
+    """Download one PDF. Skips if already saved. Returns True on success."""
+    if dest.exists():
+        logger.info(f"  [exists]  {dest.name}")
+        return True
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            time.sleep(DOWNLOAD_DELAY)
+            resp = session.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
+            logger.info(f"  [saved]   {dest.name}  ({dest.stat().st_size:,} bytes)")
+            return True
+        except requests.RequestException as exc:
+            logger.warning(f"  Attempt {attempt}/{MAX_RETRIES} failed: {exc}")
+            if attempt < MAX_RETRIES:
+                time.sleep(3 * attempt)
+
+    logger.error(f"  [fail]    Could not download {url}")
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROGRESS TRACKING
+# Saves completed download URLs to disk so re-running the script skips
+# files that are already downloaded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_visited(path: Path) -> set[str]:
+    if path.exists():
+        try:
+            return set(json.loads(path.read_text(encoding="utf-8")).get("visited", []))
+        except Exception:
+            pass
+    return set()
+
+
+def save_visited(path: Path, visited: set[str]) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"visited": sorted(visited)}, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -310,84 +328,58 @@ def run(search_url: str) -> None:
     logger.info("=" * 70)
 
     visited = load_visited(visited_file)
-    session = make_session()
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
 
-    # ── Phase 1: Collect all document page links from every results page ──────
-    logger.info("\n[Phase 1] Reading search results...")
-
-    first_page = fetch_page(session, search_url, logger)
-    if first_page is None:
-        logger.critical("Could not load the search URL. Check your internet connection or the URL.")
-        return
-
-    total_pages = detect_total_pages(first_page)
-    logger.info(f"  Found {total_pages} page(s) of results.")
-
-    all_doc_links: list[str] = list(find_document_links(first_page))
-    logger.info(f"  Page 1: {len(all_doc_links)} document link(s)")
-
-    for page_num in range(2, total_pages + 1):
-        page_url = paginated_url(search_url, page_num)
-        logger.info(f"  Page {page_num}: {page_url}")
-        soup = fetch_page(session, page_url, logger)
-        if soup is None:
-            logger.warning(f"  Could not load page {page_num} — skipping.")
-            continue
-        links = find_document_links(soup)
-        all_doc_links.extend(links)
-        logger.info(f"  Page {page_num}: {len(links)} document link(s)")
-
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    doc_links: list[str] = []
-    for link in all_doc_links:
-        if link not in seen:
-            seen.add(link)
-            doc_links.append(link)
-
-    new_doc_links = [l for l in doc_links if l not in visited]
+    # ── Phase 1: collect all download links from search results ───────────────
+    logger.info("\n[Phase 1] Collecting document links from search results...")
+    download_links, item_links = collect_all_links(search_url, logger)
     logger.info(
-        f"\n[Phase 1 complete] {len(doc_links)} total documents found, "
-        f"{len(new_doc_links)} not yet downloaded.\n"
+        f"\n[Phase 1 complete] "
+        f"{len(download_links)} direct download link(s), "
+        f"{len(item_links)} item page(s) to resolve."
     )
 
-    # ── Phase 2: Download PDFs from each document page ────────────────────────
+    # ── Phase 1b: resolve Item/View pages to their download links ─────────────
+    if item_links:
+        logger.info("\n[Phase 1b] Resolving item pages to file links...")
+        extra = resolve_item_pages(item_links, session, logger)
+        download_links |= extra
+
+    new_links = sorted(download_links - visited)
+    logger.info(
+        f"\n{len(download_links)} total download link(s) found. "
+        f"{len(new_links)} not yet downloaded.\n"
+    )
+
+    # ── Phase 2: download every PDF ───────────────────────────────────────────
     logger.info("[Phase 2] Downloading PDFs...")
-    total = len(new_doc_links)
     downloaded = 0
+    total = len(new_links)
 
-    for idx, doc_url in enumerate(new_doc_links, 1):
-        logger.info(f"\n[{idx:>4}/{total}]  {doc_url}")
-
-        soup = fetch_page(session, doc_url, logger)
-        if soup is None:
-            continue
-
-        pdf_links = find_pdf_links(soup, doc_url)
-
-        if not pdf_links:
-            logger.info("  No PDF links found on this page.")
-        else:
-            logger.info(f"  Found {len(pdf_links)} PDF link(s)")
-            for pdf_url in pdf_links:
-                if pdf_url in visited:
-                    logger.info(f"  [skip]  Already downloaded.")
-                    continue
-                dest = pdf_dir / pdf_filename_from_url(pdf_url)
-                ok = download_pdf(session, pdf_url, dest, logger)
-                if ok:
-                    downloaded += 1
-                    visited.add(pdf_url)
-
-        visited.add(doc_url)
-        save_visited(visited_file, visited)
+    for idx, url in enumerate(new_links, 1):
+        file_id = url.rstrip("/").rsplit("/", 1)[-1]
+        dest = pdf_dir / filename_from_url(url, fallback_id=file_id)
+        logger.info(f"\n[{idx:>4}/{total}]  {url}")
+        ok = download_pdf(session, url, dest, logger)
+        if ok:
+            downloaded += 1
+            visited.add(url)
+            save_visited(visited_file, visited)
 
     logger.info(
         f"\n{'=' * 70}\n"
         f"Finished.\n"
-        f"  PDFs saved    : {downloaded}\n"
-        f"  Saved to      : {pdf_dir.resolve()}\n"
-        f"  Full log      : {log_file.resolve()}\n"
+        f"  PDFs saved  : {downloaded}\n"
+        f"  Saved to    : {pdf_dir.resolve()}\n"
+        f"  Full log    : {log_file.resolve()}\n"
         f"{'=' * 70}"
     )
 
