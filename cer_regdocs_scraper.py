@@ -7,8 +7,13 @@ Canada Energy Regulator REGDOCS Advanced Search URL.
 
 Requires: Python 3.10+, Microsoft Edge, internet access.
 See README for pip install commands.
+
+Usage:
+  python cer_regdocs_scraper.py
+  python cer_regdocs_scraper.py --url "https://apps.cer-rec.gc.ca/REGDOCS/Search/AdvancedResults?sd=2026-03-01&ed=2026-04-01&rds=..."
 """
 
+import argparse
 import base64
 import hashlib
 import json
@@ -825,4 +830,20 @@ def run() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Download all documents from a CER REGDOCS Advanced Search URL."
+    )
+    parser.add_argument(
+        "--url",
+        default=None,
+        help=(
+            "The filtered REGDOCS Advanced Search URL to scrape. "
+            "If omitted, uses the SEARCH_URL constant defined at the top of this file."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.url:
+        SEARCH_URL = args.url
+
     run()
