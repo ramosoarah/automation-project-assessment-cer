@@ -17,11 +17,11 @@ pre-filtered Advanced Search URL.
 ## Installation
 
 ```bash
-pip install selenium webdriver-manager
+pip install selenium webdriver-manager requests
 ```
 
-That is all that is needed. `webdriver-manager` automatically downloads the
-correct `msedgedriver.exe` for your installed version of Edge.
+`webdriver-manager` automatically downloads the correct `msedgedriver.exe`
+for your installed version of Edge.
 
 ---
 
@@ -73,9 +73,12 @@ run()
 
 ### Key design decisions
 
-**Why `driver.get(pdf_url)` instead of `requests.get()`?**
-REGDOCS requires live session cookies that Selenium holds but `requests` does
-not. Navigating the browser to the PDF URL uses those cookies automatically.
+**Why `requests.get()` with browser cookies instead of pure browser navigation?**
+`requests` is faster and more reliable for file downloads. After the browser
+establishes a session with REGDOCS, its cookies are extracted via
+`driver.get_cookies()` and passed to `requests`, giving it the same auth
+context. Browser navigation is kept as a fallback for servers that reject
+non-browser User-Agent headers or use client-side redirects.
 
 **Why `plugins.always_open_pdf_externally: True`?**
 Without this preference Edge renders PDFs inside a browser tab and nothing is

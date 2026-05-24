@@ -19,6 +19,8 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 
+import requests as _requests
+
 from selenium import webdriver
 from selenium.common.exceptions import (
     NoSuchElementException,
@@ -247,8 +249,9 @@ def trigger_browser_download(
     logger: logging.Logger,
 ) -> bool:
     """
-    Navigate the browser to a PDF URL so that Edge downloads it using the
-    live session cookies — bypassing any auth/CSRF that would block requests.get().
+    Download a PDF, trying two methods in order:
+      1. requests.get() with the browser's live session cookies (fast, reliable).
+      2. Browser navigation fallback — for servers that reject non-browser clients.
 
     Returns True if a new file was confirmed in the download directory.
     """
@@ -264,10 +267,39 @@ def trigger_browser_download(
         return False
 
     visited_urls.add(url)
-    before = snapshot_pdfs(download_dir)
+    output_path = download_dir / filename
     logger.info(f"  [download]  {filename}")
     logger.debug(f"             URL: {url}")
 
+    # ── Primary: requests download with browser session cookies ──────────────
+    try:
+        session_cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
+        user_agent = driver.execute_script("return navigator.userAgent;")
+        resp = _requests.get(
+            url,
+            cookies=session_cookies,
+            headers={"User-Agent": user_agent, "Referer": BASE_URL},
+            stream=True,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "").lower()
+        if "pdf" in content_type or url.lower().endswith(".pdf"):
+            output_path.write_bytes(resp.content)
+            downloaded_names.add(output_path.name)
+            logger.info(
+                f"  [saved]     {output_path.name} "
+                f"({output_path.stat().st_size:,} bytes)"
+            )
+            return True
+        logger.debug(
+            f"  [non-pdf]   content-type={content_type!r} — trying browser fallback"
+        )
+    except Exception as exc:
+        logger.debug(f"  [req-fail]  requests failed ({exc}) — trying browser fallback")
+
+    # ── Fallback: navigate the browser to the URL and let Edge download it ────
+    before = snapshot_pdfs(download_dir)
     try:
         driver.get(url)
     except TimeoutException:
@@ -287,7 +319,7 @@ def trigger_browser_download(
         logger.info(f"  [saved]     {sorted(new_files)}")
         return True
 
-    logger.warning(f"  [no-file]   No new PDF appeared after navigating to {url}")
+    logger.warning(f"  [no-file]   No new PDF appeared for {url}")
     return False
 
 
