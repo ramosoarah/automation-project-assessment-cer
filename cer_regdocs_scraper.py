@@ -142,7 +142,10 @@ def collect_all_links(search_url: str, logger: logging.Logger) -> tuple[set[str]
     item_links: set[str] = set()
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
         page = browser.new_page()
         page.set_default_timeout(30_000)
 
@@ -335,7 +338,12 @@ def run(search_url: str) -> None:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-CA,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": BASE_URL + "/",
+        "Upgrade-Insecure-Requests": "1",
     })
 
     # ── Phase 1: collect all download links from search results ───────────────
