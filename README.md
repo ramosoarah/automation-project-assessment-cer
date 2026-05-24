@@ -18,6 +18,7 @@ pre-filtered Advanced Search URL.
 
 ```bash
 pip install selenium webdriver-manager requests
+pip install playwright
 ```
 
 `webdriver-manager` automatically downloads the correct `msedgedriver.exe`
